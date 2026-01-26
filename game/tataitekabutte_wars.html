@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Galactic Saber Janken</title>
+    <style>
+        body {
+            background-color: #050505;
+            color: #fff;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Courier New', monospace;
+        }
+        canvas {
+            border: 4px solid #444;
+            box-shadow: 0 0 20px #000;
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="gameCanvas" width="640" height="480"></canvas>
+
+<script>
+/**
+ * Galactic Saber Janken v6 (Final Layout Fix)
+ * 修正点:
+ * - じゃんけんアイコンをシンプルで丸っこいデザインに変更（ゴツゴツ感を解消）
+ * - バトル画面（結果表示）での文字被りを解消するためのレイアウト調整
+ */
+
+// --- 定数と設定 ---
+const CANVAS_WIDTH = 640;
+const CANVAS_HEIGHT = 480;
+const FPS = 60;
+
+// キーコード
+const KEY_ENTER = 'Enter';
+const KEY_1 = '1';
+const KEY_2 = '2';
+const KEY_3 = '3';
+const KEY_UP = 'ArrowUp';
+const KEY_DOWN = 'ArrowDown';
+
+// ゲームステート
+const STATE_TITLE = 0;
+const STATE_INTRO = 1;
+const STATE_RPS_WAIT = 2;
+const STATE_RPS_RESULT = 3;
+const STATE_ACTION_WAIT = 4;
+const STATE_ACTION_ANIM = 5;
+const STATE_MSG_WAIT = 6;
+const STATE_NEXT_STAGE = 7;
+const STATE_GAME_OVER = 8;
+const STATE_ENDING = 9;
+
+// じゃんけんの手
+const HAND_GU = 0;
+const HAND_CHOKI = 1;
+const HAND_PA = 2;
+const HAND_STR = ["グー", "チョキ", "パー"];
+
+// キャラクター定義
+const CHARA_PADAWAN = 0;
+const CHARA_OBIW = 1;
+const CHARA_YODA = 2;
+const CHARA_VADER = 3;
+
+// 難易度調整: ヨーダを少し優しく (+0.25s)
+const STAGE_CONFIG = [
+    { type: CHARA_PADAWAN, name: "パダワン", reactionTime: 1500, color: "#4488ff" },
+    { type: CHARA_OBIW, name: "オビ＝ワン", reactionTime: 1000, color: "#4488ff" },
+    { type: CHARA_YODA, name: "マスター・ヨーダ", reactionTime: 750, color: "#22cc22" }
+];
+
+// --- グローバル変数 ---
+let canvas, ctx;
+let lastTime = 0;
+let gameState = STATE_TITLE;
+let stageIndex = 0;
+let enemy = null;
+let playerHand = -1;
+let enemyHand = -1;
+let resultText = "";
+let subResultText = "";
+let dialogueText = "";
+let timer = 0;
+let animationTimer = 0;
+let isVader = false;
+let actionResult = "NONE";
+let bgStars = [];
+
+// サウンドコンテキスト
+let audioCtx = null;
+
+// --- サウンド生成クラス ---
+const Sound = {
+    init: function() {
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+    },
+    playTone: function(freq, type, duration, vol=0.1) {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    },
+    playSaberOn: function() {
+        this.playTone(150, 'sawtooth', 0.5, 0.1);
+    },
+    playClash: function() {
+        if (!audioCtx) return;
+        const bufferSize = audioCtx.sampleRate * 0.5;
+        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+            data[i] = Math.random() * 2 - 1;
+        }
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = buffer;
+        const gain = audioCtx.createGain();
+        gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+        noise.connect(gain);
+        gain.connect(audioCtx.destination);
+        noise.start();
+    },
+    playSwing: function() {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.frequency.setValueAtTime(400, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.3);
+        gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.3);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.3);
+    }
+};
+
+// --- 初期化 ---
+window.onload = function() {
+    canvas = document.getElementById('gameCanvas');
+    ctx = canvas.getContext('2d');
+
+    window.addEventListener('keydown', handleInput);
+
+    for(let i=0; i<100; i++) {
+        bgStars.push({
+            x: Math.random() * CANVAS_WIDTH,
+            y: Math.random() * CANVAS_HEIGHT,
+            size: Math.random() * 2,
+            speed: Math.random() * 3 + 0.5
+        });
+    }
+
+    gameLoop();
+};
+
+// --- 入力処理 ---
+function handleInput(e) {
+    if (e.repeat) return;
+
+    if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+
+    switch(gameState) {
+        case STATE_TITLE:
+            if (e.key === KEY_ENTER) {
+                Sound.init();
+                Sound.playSaberOn();
+                startGame();
+            }
+            break;
+
+        case STATE_RPS_WAIT:
+            if (e.key === KEY_1) processRPS(HAND_GU);
+            if (e.key === KEY_2) processRPS(HAND_CHOKI);
+            if (e.key === KEY_3) processRPS(HAND_PA);
+            break;
+
+        case STATE_ACTION_WAIT:
+            if (isVader) return;
+            if (e.key === KEY_UP) processAction(true);
+            if (e.key === KEY_DOWN) processAction(false);
+            break;
+
+        case STATE_GAME_OVER:
+        case STATE_ENDING:
+            if (e.key === KEY_ENTER) {
+                gameState = STATE_TITLE;
+            }
+            break;
+    }
+}
+
+// --- ゲームロジック ---
+
+function startGame() {
+    stageIndex = 0;
+    setupStage();
+}
+
+function setupStage() {
+    // ベイダー判定: 毎回10%の確率で出現
+    isVader = (Math.random() < 0.1);
+
+    if (isVader) {
+        enemy = { type: CHARA_VADER, name: "ダース・ベイダー", reactionTime: 0, color: "#ff0000" };
+    } else {
+        enemy = STAGE_CONFIG[stageIndex];
+    }
+
+    gameState = STATE_INTRO;
+    timer = 0;
+    dialogueText = "フォースと共にあれ・・・";
+    resultText = "";
+    subResultText = "";
+
+    setTimeout(() => {
+        if(gameState === STATE_INTRO) {
+            gameState = STATE_RPS_WAIT;
+            dialogueText = "";
+        }
+    }, 2000);
+}
+
+function processRPS(hand) {
+    playerHand = hand;
+    enemyHand = Math.floor(Math.random() * 3);
+
+    gameState = STATE_RPS_RESULT;
+
+    let resultCalc = (playerHand - enemyHand + 3) % 3;
+
+    if (isVader) {
+        resultText = "ベイダーはルールを無視した！";
+        subResultText = "防御不能！";
+    } else {
+        if (resultCalc === 0) {
+            resultText = "あいこ！";
+            subResultText = "勝負はこれからだ";
+        }
+        else if (resultCalc === 1) {
+            resultText = "負け！";
+            subResultText = "↓キーで防御せよ！";
+        }
+        else {
+            resultText = "勝ち！";
+            subResultText = "↑キーで攻撃せよ！";
+        }
+    }
+
+    timer = Date.now();
+    setTimeout(() => {
+        gameState = STATE_ACTION_WAIT;
+        timer = Date.now();
+
+        if (isVader) {
+             vaderKillEvent();
+        } else {
+             setTimeout(cpuActionTrigger, enemy.reactionTime);
+        }
+    }, 500);
+}
+
+function cpuActionTrigger() {
+    if (gameState !== STATE_ACTION_WAIT) return;
+
+    let resultCalc = (playerHand - enemyHand + 3) % 3;
+
+    if (resultCalc === 0) {
+        processActionResult("DRAW_RESET");
+    }
+    else if (resultCalc === 1) {
+        processActionResult("PLAYER_DEATH");
+    }
+    else if (resultCalc === 2) {
+        processActionResult("CPU_BLOCK");
+    }
+}
+
+function processAction(isAttack) {
+    if (gameState !== STATE_ACTION_WAIT) return;
+
+    let resultCalc = (playerHand - enemyHand + 3) % 3;
+
+    if (resultCalc === 2) {
+        if (isAttack) {
+            Sound.playSwing();
+            processActionResult("PLAYER_WIN");
+        } else {
+            processActionResult("PLAYER_DEATH_MISTAKE");
+        }
+    }
+    else if (resultCalc === 1) {
+        if (!isAttack) {
+            Sound.playClash();
+            processActionResult("PLAYER_BLOCK");
+        } else {
+            processActionResult("PLAYER_DEATH_MISTAKE");
+        }
+    }
+}
+
+function processActionResult(result) {
+    gameState = STATE_MSG_WAIT;
+    actionResult = result;
+
+    const vaderVoice = "しゅこ〜〜";
+
+    switch(result) {
+        case "PLAYER_WIN":
+            dialogueText = enemy.type === CHARA_VADER ? vaderVoice : "ばかな";
+            Sound.playClash();
+            setTimeout(() => {
+                if (stageIndex < 2) {
+                    stageIndex++;
+                    setupStage();
+                } else {
+                    gameState = STATE_ENDING;
+                }
+            }, 2000);
+            break;
+
+        case "PLAYER_DEATH":
+        case "PLAYER_DEATH_MISTAKE":
+            dialogueText = enemy.type === CHARA_VADER ? vaderVoice : "ざこめ";
+            actionResult = "PLAYER_DEATH";
+            Sound.playClash();
+            setTimeout(() => {
+                gameState = STATE_GAME_OVER;
+            }, 2000);
+            break;
+
+        case "CPU_BLOCK":
+            dialogueText = enemy.type === CHARA_VADER ? vaderVoice : "ざこめ";
+            Sound.playClash();
+            setTimeout(restartRPS, 2000);
+            break;
+
+        case "PLAYER_BLOCK":
+            dialogueText = enemy.type === CHARA_VADER ? vaderVoice : "やるな";
+            setTimeout(restartRPS, 2000);
+            break;
+
+        case "DRAW_RESET":
+            dialogueText = enemy.type === CHARA_VADER ? vaderVoice : "やるな";
+            setTimeout(restartRPS, 2000);
+            break;
+    }
+}
+
+function vaderKillEvent() {
+    processActionResult("PLAYER_DEATH");
+}
+
+function restartRPS() {
+    gameState = STATE_RPS_WAIT;
+    dialogueText = "";
+    resultText = "";
+    subResultText = "";
+}
+
+// --- 描画処理 ---
+
+function gameLoop() {
+    update();
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+function update() {
+    bgStars.forEach(star => {
+        star.y += star.speed;
+        if (star.y > CANVAS_HEIGHT) star.y = 0;
+    });
+
+    animationTimer++;
+}
+
+function draw() {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+    ctx.fillStyle = "#fff";
+    bgStars.forEach(star => {
+        ctx.fillRect(star.x, star.y, star.size, star.size);
+    });
+
+    if (gameState === STATE_TITLE) {
+        drawTitle();
+        return;
+    }
+
+    if (gameState === STATE_ENDING) {
+        drawEnding();
+        return;
+    }
+
+    if (gameState === STATE_GAME_OVER) {
+        drawGameOver();
+        return;
+    }
+
+    drawEnemy(enemy);
+    drawPlayerSaber();
+    drawUI();
+
+    if (gameState === STATE_MSG_WAIT) {
+        if (actionResult === "PLAYER_DEATH" || actionResult === "PLAYER_DEATH_MISTAKE") {
+            ctx.fillStyle = "rgba(255, 0, 0, 0.5)";
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        } else if (actionResult === "PLAYER_WIN") {
+            ctx.fillStyle = "rgba(100, 200, 255, 0.5)";
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        }
+    }
+}
+
+function drawEnemy(chara) {
+    let centerX = CANVAS_WIDTH / 2;
+    let centerY = CANVAS_HEIGHT / 2;
+    let bob = Math.sin(animationTimer * 0.05) * 5;
+
+    ctx.save();
+    ctx.translate(centerX, centerY + bob);
+
+    if (chara.type === CHARA_PADAWAN) {
+        // パダワン
+        ctx.fillStyle = "#5d4037";
+        ctx.beginPath();
+        ctx.moveTo(-50, 100);
+        ctx.bezierCurveTo(-55, 50, -40, -50, 0, -60);
+        ctx.bezierCurveTo(40, -50, 55, 50, 50, 100);
+        ctx.fill();
+        // インナー
+        ctx.fillStyle = "#d7ccc8";
+        ctx.beginPath();
+        ctx.moveTo(-20, -50);
+        ctx.lineTo(0, 100);
+        ctx.lineTo(20, -50);
+        ctx.fill();
+        // 顔
+        ctx.fillStyle = "#ffccbc";
+        ctx.beginPath();
+        ctx.arc(0, -50, 25, 0, Math.PI*2);
+        ctx.fill();
+        // 髪
+        ctx.fillStyle = "#3e2723";
+        ctx.beginPath();
+        ctx.arc(0, -55, 26, Math.PI, Math.PI*2);
+        ctx.fill();
+        // ブレイド
+        ctx.strokeStyle = "#3e2723";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(25, -50);
+        ctx.quadraticCurveTo(35, -20, 30, 0);
+        ctx.stroke();
+        // 目
+        ctx.fillStyle = "#000";
+        ctx.fillRect(-10, -55, 4, 4);
+        ctx.fillRect(10, -55, 4, 4);
+        drawSaberBlade(ctx, 40, 20, chara.color);
+    }
+    else if (chara.type === CHARA_OBIW) {
+        // オビワン
+        ctx.fillStyle = "#d7ccc8";
+        ctx.beginPath();
+        ctx.moveTo(-60, 100);
+        ctx.bezierCurveTo(-65, 0, -40, -70, 0, -70);
+        ctx.bezierCurveTo(40, -70, 65, 0, 60, 100);
+        ctx.fill();
+        // 外套
+        ctx.fillStyle = "#5d4037";
+        ctx.beginPath();
+        ctx.moveTo(-60, 20);
+        ctx.quadraticCurveTo(-30, -50, 0, -70);
+        ctx.quadraticCurveTo(30, -50, 60, 20);
+        ctx.lineTo(60, 100);
+        ctx.lineTo(40, 100);
+        ctx.lineTo(40, 20);
+        ctx.lineTo(-40, 20);
+        ctx.lineTo(-40, 100);
+        ctx.lineTo(-60, 100);
+        ctx.fill();
+        // 顔
+        ctx.fillStyle = "#ffccbc";
+        ctx.beginPath();
+        ctx.arc(0, -50, 28, 0, Math.PI*2);
+        ctx.fill();
+        // 髪と髭
+        ctx.fillStyle = "#8d6e63";
+        ctx.beginPath();
+        ctx.arc(0, -55, 30, Math.PI * 0.9, Math.PI * 2.1);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(-28, -50);
+        ctx.quadraticCurveTo(0, -20, 28, -50);
+        ctx.quadraticCurveTo(0, -30, -28, -50);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(-10, -35);
+        ctx.lineTo(10, -35);
+        ctx.stroke();
+        drawSaberBlade(ctx, 50, 10, chara.color);
+    }
+    else if (chara.type === CHARA_YODA) {
+        // ヨーダ
+        ctx.fillStyle = "#d7ccc8";
+        ctx.beginPath();
+        ctx.moveTo(-40, 100);
+        ctx.quadraticCurveTo(0, 0, 40, 100);
+        ctx.fill();
+        // 頭部
+        ctx.fillStyle = "#7cb342";
+        ctx.beginPath();
+        ctx.moveTo(-20, 0);
+        ctx.lineTo(-60, -10);
+        ctx.lineTo(-20, 10);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(20, 0);
+        ctx.lineTo(60, -10);
+        ctx.lineTo(20, 10);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(0, 0, 22, 0, Math.PI*2);
+        ctx.fill();
+        // 皺
+        ctx.strokeStyle = "#558b2f";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(-10, -10);
+        ctx.lineTo(10, -10);
+        ctx.moveTo(-8, -15);
+        ctx.lineTo(8, -15);
+        ctx.stroke();
+        // 目
+        ctx.fillStyle = "#000";
+        ctx.beginPath();
+        ctx.ellipse(-8, 0, 3, 2, 0, 0, Math.PI*2);
+        ctx.ellipse(8, 0, 3, 2, 0, 0, Math.PI*2);
+        ctx.fill();
+        // 白髪
+        ctx.fillStyle = "#f0f0f0";
+        ctx.beginPath();
+        ctx.arc(20, 0, 5, 0, Math.PI*2);
+        ctx.arc(-20, 0, 5, 0, Math.PI*2);
+        ctx.fill();
+        drawSaberBlade(ctx, 30, 40, chara.color);
+    }
+    else if (chara.type === CHARA_VADER) {
+        // ベイダー
+        ctx.fillStyle = "#111";
+        ctx.beginPath();
+        ctx.moveTo(-70, 100);
+        ctx.quadraticCurveTo(0, -80, 70, 100);
+        ctx.fill();
+        // 胸のパネル
+        ctx.fillStyle = "#000";
+        ctx.fillRect(-25, 20, 50, 40);
+        ctx.fillStyle = "#silver";
+        ctx.strokeStyle = "#555";
+        ctx.strokeRect(-25, 20, 50, 40);
+        ctx.fillStyle = "red";
+        ctx.fillRect(-20, 25, 10, 10);
+        ctx.fillStyle = "blue";
+        ctx.fillRect(-5, 25, 10, 10);
+        ctx.fillStyle = "green";
+        ctx.fillRect(10, 25, 10, 10);
+        // ヘルメット
+        ctx.fillStyle = "#000";
+        ctx.beginPath();
+        ctx.moveTo(-40, -50);
+        ctx.quadraticCurveTo(0, -120, 40, -50);
+        ctx.lineTo(50, 10);
+        ctx.quadraticCurveTo(0, 20, -50, 10);
+        ctx.fill();
+        // 光沢
+        ctx.fillStyle = "#444";
+        ctx.beginPath();
+        ctx.moveTo(-20, -90);
+        ctx.quadraticCurveTo(0, -100, 20, -90);
+        ctx.lineTo(15, -85);
+        ctx.quadraticCurveTo(0, -95, -15, -85);
+        ctx.fill();
+        // マスク
+        ctx.fillStyle = "#222";
+        ctx.beginPath();
+        ctx.moveTo(-30, -50);
+        ctx.lineTo(30, -50);
+        ctx.lineTo(20, 10);
+        ctx.lineTo(-20, 10);
+        ctx.fill();
+        // 目
+        ctx.fillStyle = "#000";
+        ctx.beginPath();
+        ctx.ellipse(-15, -35, 10, 8, -0.2, 0, Math.PI*2);
+        ctx.ellipse(15, -35, 10, 8, 0.2, 0, Math.PI*2);
+        ctx.fill();
+        // 口元
+        ctx.fillStyle = "#000";
+        ctx.beginPath();
+        ctx.moveTo(0, -20);
+        ctx.lineTo(15, 10);
+        ctx.lineTo(-15, 10);
+        ctx.fill();
+        ctx.strokeStyle = "#444";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, -20); ctx.lineTo(0, 10);
+        ctx.moveTo(-5, -10); ctx.lineTo(5, -10);
+        ctx.moveTo(-10, 0); ctx.lineTo(10, 0);
+        ctx.stroke();
+        drawSaberBlade(ctx, 60, 0, chara.color);
+    }
+    ctx.restore();
+}
+
+function drawSaberBlade(ctx, x, y, color) {
+    ctx.save();
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = color;
+    ctx.fillStyle = "#fff";
+    let angle = -Math.PI / 4;
+    if (gameState === STATE_MSG_WAIT && (actionResult === "PLAYER_DEATH" || actionResult === "PLAYER_DEATH_MISTAKE")) {
+         angle = Math.sin(Date.now() / 50);
+    }
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.fillStyle = color;
+    ctx.fillRect(0, -100, 10, 100);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(2, -95, 6, 90);
+    ctx.restore();
+}
+
+function drawPlayerSaber() {
+    ctx.save();
+    let saberX = CANVAS_WIDTH * 0.7;
+    let saberY = CANVAS_HEIGHT;
+    let angle = -Math.PI / 8;
+    let length = 250;
+    if (gameState === STATE_MSG_WAIT && (actionResult === "PLAYER_BLOCK" || actionResult === "CPU_BLOCK")) {
+        angle = -Math.PI / 2;
+        saberX = CANVAS_WIDTH * 0.5;
+        saberY = CANVAS_HEIGHT - 50;
+    }
+    else if (gameState === STATE_MSG_WAIT && actionResult === "PLAYER_WIN") {
+        angle = -Math.PI / 2.5;
+        saberX = CANVAS_WIDTH * 0.5;
+        length = 300;
+    }
+    ctx.translate(saberX, saberY);
+    ctx.rotate(angle);
+    ctx.shadowBlur = 20;
+    ctx.shadowColor = "#00ff00";
+    ctx.fillStyle = "#00ff00";
+    ctx.fillRect(-10, -length, 20, length);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(-5, -length + 10, 10, length - 10);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "#888";
+    ctx.fillRect(-12, 0, 24, 60);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(-12, 10, 24, 5);
+    ctx.fillRect(-12, 25, 24, 5);
+    ctx.restore();
+}
+
+// じゃんけんアイコン描画関数（シンプル化）
+function drawHandIcon(ctx, type, x, y, size) {
+    ctx.save();
+    ctx.translate(x, y);
+
+    // カラー：スターウォーズイエロー
+    const handColor = "#ffe81f";
+    ctx.fillStyle = handColor;
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 4; // 線を太くして可愛く
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    if (type === HAND_GU) {
+        // グー：単純な円
+        ctx.beginPath();
+        ctx.arc(0, 0, size/2, 0, Math.PI*2);
+        ctx.fill();
+        ctx.stroke();
+    }
+    else if (type === HAND_CHOKI) {
+        // チョキ：丸い手＋二本指
+
+        // 指（先に描く）
+        ctx.beginPath();
+        // V字
+        ctx.moveTo(-size/5, -size/5);
+        ctx.lineTo(-size/2, -size);
+        ctx.moveTo(size/5, -size/5);
+        ctx.lineTo(size/2, -size);
+        // パスを太く描画
+        ctx.stroke();
+
+        // 塗りつぶし用（指の肉付け）
+        ctx.lineWidth = size/3; // 太い線で指を表現
+        ctx.beginPath();
+        ctx.moveTo(-size/5, -size/5);
+        ctx.lineTo(-size/2.5, -size*0.8);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(size/5, -size/5);
+        ctx.lineTo(size/2.5, -size*0.8);
+        ctx.stroke();
+
+        // 枠線リセット
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = "#000";
+
+        // 手のひら（丸）
+        ctx.beginPath();
+        ctx.arc(0, 0, size/2, 0, Math.PI*2);
+        ctx.fill();
+        ctx.stroke();
+
+        // 仕上げに指の輪郭を描きたいが、シンプルに「丸い手から棒が出ている」スタイルにする
+        // 再描画して綺麗にする
+        ctx.fillStyle = handColor;
+        ctx.beginPath();
+        // 左指
+        ctx.rect(-size/2.5, -size*0.9, size/4, size);
+        // 右指
+        ctx.rect(size/6.5, -size*0.9, size/4, size);
+        ctx.fill();
+        ctx.stroke();
+
+        // 手のひらを上書き
+        ctx.beginPath();
+        ctx.arc(0, 0, size/2, 0, Math.PI*2);
+        ctx.fill();
+        ctx.stroke();
+    }
+    else if (type === HAND_PA) {
+        // パー：丸い手＋5本指（放射状）
+
+        // 指を描く
+        for(let i=0; i<5; i++) {
+            let angle = (Math.PI / 4) * (i - 2) - Math.PI/2; // -PI/2を中心に扇状
+            let fingerLen = size * 0.9;
+
+            ctx.save();
+            ctx.rotate(angle);
+            ctx.beginPath();
+            ctx.rect(-size/8, -fingerLen, size/4, fingerLen);
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        // 手のひらを上書き
+        ctx.beginPath();
+        ctx.arc(0, 0, size/2, 0, Math.PI*2);
+        ctx.fill();
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
+
+function drawUI() {
+    ctx.fillStyle = "#fff";
+    ctx.font = "20px monospace";
+    ctx.textAlign = "center";
+
+    ctx.fillText("VS " + enemy.name, CANVAS_WIDTH/2, 40);
+
+    // じゃんけんUI
+    if (gameState === STATE_RPS_WAIT) {
+        ctx.font = "16px monospace";
+        ctx.fillText("手を選んでください", CANVAS_WIDTH/2, 330);
+
+        let gap = 200;
+        let iconSize = 60;
+        let baseY = 390;
+
+        drawHandIcon(ctx, HAND_GU, CANVAS_WIDTH/2 - gap, baseY, iconSize);
+        ctx.fillStyle = "#fff";
+        ctx.fillText("[1] グー", CANVAS_WIDTH/2 - gap, baseY + 50);
+
+        drawHandIcon(ctx, HAND_CHOKI, CANVAS_WIDTH/2, baseY, iconSize);
+        ctx.fillStyle = "#fff";
+        ctx.fillText("[2] チョキ", CANVAS_WIDTH/2, baseY + 50);
+
+        drawHandIcon(ctx, HAND_PA, CANVAS_WIDTH/2 + gap, baseY, iconSize);
+        ctx.fillStyle = "#fff";
+        ctx.fillText("[3] パー", CANVAS_WIDTH/2 + gap, baseY + 50);
+    }
+
+    // 結果表示
+    if (gameState >= STATE_RPS_RESULT) {
+        // 文字被りを防ぐため、全体的にY座標を調整
+        ctx.font = "30px monospace";
+        ctx.fillStyle = "#ffcc00";
+        // 結果テキストを上に移動 (100 -> 80)
+        ctx.fillText(resultText, CANVAS_WIDTH/2, 80);
+
+        if (subResultText) {
+            ctx.font = "20px monospace";
+            ctx.fillStyle = "#ff5555";
+            // サブテキストも上に移動 (130 -> 110)
+            ctx.fillText(subResultText, CANVAS_WIDTH/2, 110);
+        }
+
+        // お互いの手を表示 (アイコン + テキスト)
+        let pX = CANVAS_WIDTH/2 - 150;
+        let eX = CANVAS_WIDTH/2 + 150;
+        // アイコン表示位置を下に移動 (180 -> 230)
+        let iconY = 230;
+        // テキスト位置を調整 (iconY - 60)
+        let textY = iconY - 70;
+
+        ctx.fillStyle = "#fff";
+        ctx.font = "16px monospace";
+
+        ctx.fillText("あなた", pX, textY);
+        if (playerHand >= 0) drawHandIcon(ctx, playerHand, pX, iconY, 60);
+
+        ctx.fillText("CPU", eX, textY);
+        if (enemyHand >= 0) drawHandIcon(ctx, enemyHand, eX, iconY, 60);
+    }
+
+    // 台詞表示
+    if (dialogueText !== "") {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+        ctx.fillRect(100, 280, 440, 60);
+        ctx.strokeStyle = "#fff";
+        ctx.strokeRect(100, 280, 440, 60);
+
+        ctx.fillStyle = "#fff";
+        ctx.font = "20px monospace";
+        ctx.fillText(enemy.name + ":", CANVAS_WIDTH/2, 305);
+        ctx.fillText(`"${dialogueText}"`, CANVAS_WIDTH/2, 330);
+    }
+}
+
+function drawTitle() {
+    ctx.fillStyle = "#ffe81f";
+    ctx.font = "bold 40px 'Courier New'";
+    ctx.textAlign = "center";
+    ctx.fillText("STAR JANKEN WARS", CANVAS_WIDTH/2, 120);
+    ctx.font = "20px 'Courier New'";
+    ctx.fillText("TATAITE KABUTTE", CANVAS_WIDTH/2, 160);
+
+    ctx.fillStyle = "#aaa";
+    ctx.font = "18px monospace";
+    ctx.fillText("パダワン、オビ＝ワン、ヨーダの", CANVAS_WIDTH/2, 260);
+    ctx.fillText("3人を倒せばクリア！", CANVAS_WIDTH/2, 290);
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "20px monospace";
+    ctx.fillText("操作方法:", CANVAS_WIDTH/2, 330);
+    ctx.font = "16px monospace";
+    ctx.fillText("1, 2, 3 : グー、チョキ、パー", CANVAS_WIDTH/2, 360);
+    ctx.fillText("↑ : 攻撃 / ↓ : 防御", CANVAS_WIDTH/2, 390);
+
+    if (Math.floor(Date.now() / 500) % 2 === 0) {
+        ctx.font = "24px monospace";
+        ctx.fillText("Enterキーでスタート", CANVAS_WIDTH/2, 440);
+    }
+}
+
+function drawEnding() {
+    ctx.fillStyle = "#ffe81f";
+    ctx.font = "30px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("CONGRATULATIONS!", CANVAS_WIDTH/2, 200);
+    ctx.fillStyle = "#fff";
+    ctx.font = "20px monospace";
+    ctx.fillText("フォースは君と共にある", CANVAS_WIDTH/2, 250);
+    ctx.fillText("Enterキーでタイトルへ", CANVAS_WIDTH/2, 400);
+}
+
+function drawGameOver() {
+    ctx.fillStyle = "#ff0000";
+    ctx.font = "40px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("GAME OVER", CANVAS_WIDTH/2, 240);
+    ctx.fillStyle = "#fff";
+    ctx.font = "20px monospace";
+    ctx.fillText("Enterキーでタイトルへ", CANVAS_WIDTH/2, 400);
+}
+
+</script>
+</body>
+</html>
